@@ -199,7 +199,7 @@ class NotchWindow : Window
     const double TabW = 14, TabH = 56, PanelW = 320, PanelH = 152, Shadow = 12;
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     // Colour tokens; keep in sync with the XAML resources below.
-    static readonly Brush Accent = Frozen("#5B9DFF"), Muted = Frozen("#5E636B"), TabBg = Frozen("#1C1D20"), TabHover = Frozen("#2E3035");
+    static readonly Brush Accent = Frozen("#5B9DFF"), Muted = Frozen("#5E636B"), TabBg = Frozen("#1C1D20"), TabHover = Frozen("#2E3035"), PausedRed = Frozen("#E5484D");
     static readonly Geometry PlayIcon = Geometry.Parse("M0,0 L12,7 L0,14 Z"), PauseIcon = Geometry.Parse("M0,0 H4 V14 H0 Z M8,0 H12 V14 H8 Z");
 
     const string Xaml = @"
@@ -451,6 +451,8 @@ class NotchWindow : Window
         // Wheel over the tab or the panel: scroll = previous/next, Ctrl+scroll = the source app's volume.
         // Windows sends the wheel to the window under the cursor, so this works without focus.
         PreviewMouseWheel += (s, e) => { e.Handled = true; OnWheel(e.Delta); };
+        // Right-click anywhere on SideNotch toggles play/pause (or resumes the last track).
+        PreviewMouseRightButtonUp += (s, e) => { e.Handled = true; TogglePlay(); ShowPeek(); };
 
         // Tab: click expands, drag moves; Click also covers keyboard and UI Automation Invoke.
         tab.PreviewMouseLeftButtonDown += (s, e) => { pressing = true; movedTab = false; pressPt = CursorDip(); tab.CaptureMouse(); e.Handled = true; };
@@ -1075,7 +1077,7 @@ class NotchWindow : Window
         seek.IsEnabled = !loading && HasDuration && canSeek;
         seek.ToolTip = seek.IsEnabled ? null : (has && !loading ? "Seeking isn't available for this media" : null);
 
-        tabMark.Fill = playing || loading ? Accent : Muted;
+        tabMark.Fill = playing || loading ? Accent : has && status == Status.Paused ? PausedRed : Muted;
         tabMark.Opacity = loading ? 0.5 : 1;
         UpdatePeek();
         UpdateTimes();
