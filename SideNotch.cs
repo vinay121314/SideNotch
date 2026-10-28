@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
@@ -14,6 +16,7 @@ using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Interop;
 using System.Windows.Shapes;
 using Path = System.Windows.Shapes.Path;
 using System.Windows.Threading;
@@ -196,11 +199,29 @@ class NotchWindow : Window
       </Setter.Value></Setter>
     </Style>
 
+    <Style TargetType='ToolTip'>
+      <Setter Property='Foreground' Value='{StaticResource Text}'/><Setter Property='FontSize' Value='11.5'/>
+      <Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI'/>
+      <Setter Property='Template'><Setter.Value>
+        <ControlTemplate TargetType='ToolTip'>
+          <Border Background='#26282C' BorderBrush='{StaticResource Stroke}' BorderThickness='1' CornerRadius='8' Padding='10,6'><ContentPresenter/></Border>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+
     <ControlTemplate x:Key='Flat' TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate>
     <ControlTemplate x:Key='Fill' TargetType='RepeatButton'><Border Height='4' CornerRadius='2' Background='{StaticResource Accent}' VerticalAlignment='Center'/></ControlTemplate>
   </Grid.Resources>
 
-  <Button x:Name='Tab' AutomationProperties.Name='SideNotch: open player' Cursor='Hand' FocusVisualStyle='{x:Null}'>
+  <Button x:Name='Tab' AutomationProperties.Name='SideNotch: open player' Cursor='Hand' FocusVisualStyle='{x:Null}' ToolTipService.InitialShowDelay='250'>
+    <Button.ToolTip>
+      <ToolTip x:Name='Peek'>
+        <StackPanel MaxWidth='260'>
+          <TextBlock x:Name='PeekTitle' FontSize='12.5' FontWeight='SemiBold' TextTrimming='CharacterEllipsis'/>
+          <TextBlock x:Name='PeekSub' Margin='0,2,0,0' Foreground='{StaticResource TextMuted}' TextTrimming='CharacterEllipsis'/>
+        </StackPanel>
+      </ToolTip>
+    </Button.ToolTip>
     <Button.Template><ControlTemplate TargetType='Button'><ContentPresenter/></ControlTemplate></Button.Template>
     <Border x:Name='TabBody' Background='{StaticResource Bg}' BorderBrush='{StaticResource Stroke}'>
       <Rectangle x:Name='TabMark' Width='3' Height='22' RadiusX='1.5' RadiusY='1.5' Fill='#5E636B'/>
@@ -290,7 +311,14 @@ class NotchWindow : Window
     readonly Grid panel;
     readonly Rectangle tabMark, loaderBar;
     readonly Ellipse statusDot;
-    readonly TextBlock sourceText, titleText, elapsedText, durationText;
+    readonly TextBlock sourceText, titleText, elapsedText, durationText, peekTitle, peekSub;
+    readonly ToolTip peek;
+    // Hides the tab while a full-screen window covers its monitor (videos, games, slides). Win32 has no event for this.
+    readonly DispatcherTimer fullscreenWatch = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+    bool userHidden;
+    const int HotkeyId = 1;
+    const string HotkeyText = "Ctrl+Alt+N";
+    bool hotkeyOk;
     readonly Path playIcon;
     readonly Slider seek;
     readonly ScaleTransform panelScale = new ScaleTransform();
@@ -353,7 +381,11 @@ class NotchWindow : Window
         elapsedText = (TextBlock)root.FindName("Elapsed");
         durationText = (TextBlock)root.FindName("Duration");
         seek = (Slider)root.FindName("Seek");
+        peek = (ToolTip)root.FindName("Peek");
+        peekTitle = (TextBlock)root.FindName("PeekTitle");
+        peekSub = (TextBlock)root.FindName("PeekSub");
         panel.RenderTransform = panelScale;
+        tab.ToolTipOpening += (s, e) => UpdatePeek(); // refresh the elapsed time each time it shows
 
         // Tab: click expands, drag moves; Click also covers keyboard and UI Automation Invoke.
         tab.PreviewMouseLeftButtonDown += (s, e) => { pressing = true; movedTab = false; pressPt = CursorDip(); tab.CaptureMouse(); e.Handled = true; };
@@ -398,6 +430,32 @@ class NotchWindow : Window
             if (p.X < Left || p.X > Left + Width || p.Y < Top || p.Y > Top + Height) Collapse();
         };
 
+        fullscreenWatch.Tick += (s, e) =>
+        {
+            if (userHidden || expanded) return;
+            bool fs = FullscreenOnMyScreen();
+            if (fs && IsVisible) Hide();
+            else if (!fs && !IsVisible) Show();
+        };
+        fullscreenWatch.Start();
+
+        SourceInitialized += (s, e) =>
+        {
+            var h = new WindowInteropHelper(this).Handle;
+            hotkeyOk = RegisterHotKey(h, HotkeyId, 0x0002 | 0x0001 | 0x4000, 0x4E); // Ctrl+Alt+N, no auto-repeat
+            if (!hotkeyOk) Program.Log("Hotkey " + HotkeyText + " is taken by another app");
+            HwndSource.FromHwnd(h).AddHook((IntPtr hw, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
+            {
+                if (msg == 0x0312 && wp.ToInt32() == HotkeyId)
+                {
+                    handled = true;
+                    if (expanded) Collapse();
+                    else { userHidden = false; Expand(); Keyboard.Focus(playPause); }
+                }
+                return IntPtr.Zero;
+            });
+        };
+
         SystemEvents.DisplaySettingsChanged += (s, e) => Ui(() => { UpdateDpi(); Place(); });
         UpdateDpi();
         Place();
@@ -408,13 +466,33 @@ class NotchWindow : Window
 
         tray = new WF.NotifyIcon { Icon = MakeIcon(), Text = "SideNotch", Visible = true, ContextMenuStrip = new WF.ContextMenuStrip() };
         tray.ContextMenuStrip.Opening += (s, e) => { BuildMenu(tray.ContextMenuStrip); e.Cancel = false; };
-        tray.MouseClick += (s, e) => { if (e.Button == WF.MouseButtons.Left) { Show(); Expand(); } };
+        tray.MouseClick += (s, e) => { if (e.Button == WF.MouseButtons.Left) { userHidden = false; Show(); Expand(); } };
 
         Render();
         InitMedia();
     }
 
     void Ui(Action a) { Dispatcher.BeginInvoke(a); }
+
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+
+    bool FullscreenOnMyScreen()
+    {
+        var h = GetForegroundWindow();
+        RECT r;
+        if (h == IntPtr.Zero || h == new WindowInteropHelper(this).Handle || !GetWindowRect(h, out r)) return false;
+        var cls = new StringBuilder(64);
+        GetClassName(h, cls, cls.Capacity);
+        string c = cls.ToString();
+        if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false; // desktop and taskbar
+        var scr = WF.Screen.FromHandle(h);
+        var b = scr.Bounds;
+        return scr.DeviceName == CurrentScreen().DeviceName && r.L <= b.Left && r.T <= b.Top && r.R >= b.Right && r.B >= b.Bottom;
+    }
 
     // ---------- placement ----------
 
@@ -888,9 +966,29 @@ class NotchWindow : Window
 
         tabMark.Fill = playing || loading ? Accent : Muted;
         tabMark.Opacity = loading ? 0.5 : 1;
-        tab.ToolTip = has || loading || resume ? titleText.Text : "SideNotch";
+        UpdatePeek();
         UpdateTimes();
         UpdateTicker();
+    }
+
+    // Hover preview on the collapsed tab: the title plus one status line.
+    void UpdatePeek()
+    {
+        bool loading = Loading && mgrError == null, has = session != null;
+        string t = has || loading ? titleText.Text : Resumable ? settings.LastTitle : "SideNotch";
+        string sub;
+        if (loading) sub = loadingText;
+        else if (has)
+        {
+            string time = Fmt(CurrentPos()) + (HasDuration ? " / " + Fmt(end - start) : "");
+            sub = (status == Status.Playing ? "Playing" : status == Status.Paused ? "Paused" : AppName(sessionId)) + " · " + time;
+        }
+        else if (Resumable) sub = "Last played · click to resume";
+        else sub = mgrError ?? "Nothing playing";
+        peekTitle.Text = t;
+        peekSub.Text = sub + (hotkeyOk ? "   " + HotkeyText : "");
+        peek.Placement = settings.Right ? PlacementMode.Left : PlacementMode.Right;
+        peek.HorizontalOffset = settings.Right ? -6 : 6;
     }
 
     void UpdateTimes()
@@ -945,8 +1043,12 @@ class NotchWindow : Window
     void BuildMenu(WF.ContextMenuStrip menu)
     {
         menu.Items.Clear();
-        menu.Items.Add(IsVisible ? "Hide notch" : "Show notch", null, (s, e) => { if (IsVisible) Hide(); else Show(); });
-        menu.Items.Add("Open player", null, (s, e) => Expand());
+        menu.Items.Add(userHidden ? "Show notch" : "Hide notch", null, (s, e) =>
+        {
+            userHidden = !userHidden;
+            if (userHidden) { Collapse(); Hide(); } else Show();
+        });
+        menu.Items.Add(new WF.ToolStripMenuItem("Open player", null, (s, e) => { userHidden = false; Expand(); }) { ShortcutKeyDisplayString = hotkeyOk ? HotkeyText : null });
         menu.Items.Add(new WF.ToolStripSeparator());
 
         var side = new WF.ToolStripMenuItem("Side");

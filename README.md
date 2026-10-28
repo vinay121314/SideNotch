@@ -11,6 +11,9 @@ Get `SideNotch.exe` from the [latest release](https://github.com/vinay121314/Sid
 Double-click `SideNotch.exe` (or `dist\SideNotch.exe` after building). There's nothing to install; it uses the .NET Framework 4.8 built into Windows 10/11.
 
 - **Open:** click the slim tab on the screen edge, or left-click the tray icon.
+- **Hotkey:** Ctrl+Alt+N opens or closes the player from anywhere. If another app already uses that combination, the shortcut is skipped and a note goes in the log.
+- **Peek:** hover over the tab to see the title, play state and time without opening the player.
+- **Full screen:** the tab hides while a full-screen window (video, game, slideshow) covers its monitor, and returns afterwards.
 - **Close the panel:** click outside it or press Esc.
 - **Move:** drag the tab anywhere. It snaps to the nearer left/right edge of that monitor.
 - **Previous / Next:** the buttons either side of play/pause. They're greyed out when the source doesn't offer them. While the next video loads, the panel keeps the last title dimmed and shows a moving loading bar instead of "Nothing playing". If no track arrives within about 6–8 s, it shows what's actually true.
