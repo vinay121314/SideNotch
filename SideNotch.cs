@@ -294,6 +294,10 @@ class NotchWindow : Window
         <Grid.RowDefinitions><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>
 
         <DockPanel>
+          <Button x:Name='Close' DockPanel.Dock='Right' Style='{StaticResource Ghost}' Width='22' Height='22' Margin='6,-4,-6,-4'
+                  AutomationProperties.Name='Close player' ToolTip='Close (Esc)'>
+            <Path Data='M0,0 L8,8 M8,0 L0,8' Stroke='{StaticResource TextMuted}' StrokeThickness='1.4' StrokeStartLineCap='Round' StrokeEndLineCap='Round'/>
+          </Button>
           <Ellipse x:Name='Dot' Width='6' Height='6' Margin='0,1,7,0' VerticalAlignment='Center' Fill='#5E636B'/>
           <TextBlock x:Name='Source' FontSize='11.5' Foreground='{StaticResource TextMuted}' TextTrimming='CharacterEllipsis'/>
         </DockPanel>
@@ -465,6 +469,7 @@ class NotchWindow : Window
         tab.MouseEnter += (s, e) => tabBody.Background = TabHover;
         tab.MouseLeave += (s, e) => tabBody.Background = TabBg;
 
+        ((Button)root.FindName("Close")).Click += (s, e) => Collapse();
         playPause.Click += (s, e) => TogglePlay();
         prevButton.Click += (s, e) => Skip(false);
         nextButton.Click += (s, e) => Skip(true);
@@ -503,6 +508,8 @@ class NotchWindow : Window
         SourceInitialized += (s, e) =>
         {
             var h = new WindowInteropHelper(this).Handle;
+            // Tool window: keeps SideNotch out of Alt+Tab and Win+Tab (ShowInTaskbar=false alone doesn't).
+            SetWindowLong(h, -20, (GetWindowLong(h, -20) | 0x80) & ~0x40000); // GWL_EXSTYLE: +TOOLWINDOW, -APPWINDOW
             hotkeyOk = RegisterHotKey(h, HotkeyId, 0x0002 | 0x0001 | 0x4000, 0x4E); // Ctrl+Alt+N, no auto-repeat
             if (!hotkeyOk) Program.Log("Hotkey " + HotkeyText + " is taken by another app");
             HwndSource.FromHwnd(h).AddHook((IntPtr hw, int msg, IntPtr wp, IntPtr lp, ref bool handled) =>
@@ -535,6 +542,8 @@ class NotchWindow : Window
 
     void Ui(Action a) { Dispatcher.BeginInvoke(a); }
 
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
