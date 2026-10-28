@@ -2,9 +2,13 @@
 
 A small edge-docked mini player for Windows that controls whatever is playing through Windows media sessions. It prefers YouTube in Chrome. It shows text only: no video, thumbnails or artwork.
 
+## Download
+
+Get `SideNotch.exe` from the [latest release](https://github.com/vinay121314/SideNotch/releases/latest). The exe isn't code-signed, so Windows SmartScreen may warn: choose **More info → Run anyway**, or build it yourself (below).
+
 ## Run
 
-`dist\SideNotch.exe`: double-click it. There's nothing to install; it uses the .NET Framework 4.8 built into Windows 10/11.
+Double-click `SideNotch.exe` (or `dist\SideNotch.exe` after building). There's nothing to install; it uses the .NET Framework 4.8 built into Windows 10/11.
 
 - **Open:** click the slim tab on the screen edge, or left-click the tray icon.
 - **Close the panel:** click outside it or press Esc.
