@@ -46,6 +46,63 @@ static class WinRt
     }
 }
 
+// Per-app volume through Core Audio (the Windows mixer). Media sessions have no volume control.
+static class AppVolume
+{
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator { }
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceEnumerator { void _0(); [PreserveSig] int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
+
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDevice { [PreserveSig] int Activate(ref Guid iid, int ctx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o); }
+
+    [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionManager2 { void _0(); void _1(); [PreserveSig] int GetSessionEnumerator(out IAudioSessionEnumerator e); }
+
+    [Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionEnumerator { [PreserveSig] int GetCount(out int n); [PreserveSig] int GetSession(int i, out IAudioSessionControl2 s); }
+
+    [Guid("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IAudioSessionControl2
+    {
+        void _0(); void _1(); void _2(); void _3(); void _4(); void _5(); void _6(); void _7(); void _8(); void _9(); void _10();
+        [PreserveSig] int GetProcessId(out uint pid);
+    }
+
+    [Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface ISimpleAudioVolume { [PreserveSig] int SetMasterVolume(float v, ref Guid ctx); [PreserveSig] int GetMasterVolume(out float v); }
+
+    // Changes the volume of every audio session owned by a process with this name; returns the new level, or -1 if none play audio.
+    // ponytail: default output device only; enumerate all endpoints if someone routes Chrome elsewhere.
+    public static float Change(string processName, float delta)
+    {
+        var pids = new HashSet<uint>(System.Diagnostics.Process.GetProcessesByName(processName).Select(p => (uint)p.Id));
+        IMMDevice dev;
+        if (pids.Count == 0 || ((IMMDeviceEnumerator)new MMDeviceEnumerator()).GetDefaultAudioEndpoint(0, 1, out dev) != 0) return -1;
+        var iid = typeof(IAudioSessionManager2).GUID;
+        object o;
+        if (dev.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) return -1;
+        IAudioSessionEnumerator en;
+        int n;
+        if (((IAudioSessionManager2)o).GetSessionEnumerator(out en) != 0 || en.GetCount(out n) != 0) return -1;
+        float level = -1;
+        var ctx = Guid.Empty;
+        for (int i = 0; i < n; i++)
+        {
+            IAudioSessionControl2 s;
+            uint pid;
+            if (en.GetSession(i, out s) != 0 || s.GetProcessId(out pid) != 0 || !pids.Contains(pid)) continue;
+            var vol = s as ISimpleAudioVolume;
+            float cur;
+            if (vol == null || vol.GetMasterVolume(out cur) != 0) continue;
+            if (level < 0) level = Math.Max(0f, Math.Min(1f, cur + delta)); // all of the app's sessions follow the first one
+            vol.SetMasterVolume(level, ref ctx);
+        }
+        return level;
+    }
+}
+
 class Settings
 {
     public bool Right = true;
@@ -386,6 +443,10 @@ class NotchWindow : Window
         peekSub = (TextBlock)root.FindName("PeekSub");
         panel.RenderTransform = panelScale;
         tab.ToolTipOpening += (s, e) => UpdatePeek(); // refresh the elapsed time each time it shows
+        tab.MouseLeave += (s, e) => peek.IsOpen = false;
+        // Wheel over the tab or the panel: scroll = previous/next, Ctrl+scroll = the source app's volume.
+        // Windows sends the wheel to the window under the cursor, so this works without focus.
+        PreviewMouseWheel += (s, e) => { e.Handled = true; OnWheel(e.Delta); };
 
         // Tab: click expands, drag moves; Click also covers keyboard and UI Automation Invoke.
         tab.PreviewMouseLeftButtonDown += (s, e) => { pressing = true; movedTab = false; pressPt = CursorDip(); tab.CaptureMouse(); e.Handled = true; };
@@ -479,6 +540,47 @@ class NotchWindow : Window
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+
+    int wheelAcc;
+
+    void OnWheel(int delta)
+    {
+        if (GetAsyncKeyState(0x11) < 0) // Ctrl held; async state because we usually aren't the focused window
+        {
+            if (session == null) { Flash("Nothing playing"); ShowPeek(); return; }
+            string app = AppName(sessionId);
+            float v = -1;
+            try { v = AppVolume.Change(IsChrome(sessionId) ? "chrome" : ProcessName(sessionId), delta / 120f * 0.05f); }
+            catch (Exception ex) { Program.Log("Volume: " + ex.Message); }
+            Flash(v < 0 ? "Volume isn't available for " + app : app + " volume " + Math.Round(v * 100) + "%");
+            ShowPeek();
+            return;
+        }
+        wheelAcc += delta; // touchpads send small deltas; act once per notch
+        if (Math.Abs(wheelAcc) < 120) return;
+        bool next = wheelAcc < 0;
+        wheelAcc = 0;
+        if (session == null || Loading) return;
+        if (next ? canNext : canPrev) { notice = null; Skip(next); } // show the loading text, not a stale notice
+        else Flash(next ? "No next track in this source" : "No previous track in this source");
+        ShowPeek();
+    }
+
+    static string ProcessName(string aumid)
+    {
+        var n = System.IO.Path.GetFileNameWithoutExtension(aumid.Split('!')[0]);
+        return n.Split('_')[0];
+    }
+
+    void ShowPeek()
+    {
+        if (expanded) return; // the panel header already shows it
+        UpdatePeek();
+        peek.PlacementTarget = tab;
+        peek.IsOpen = true;
+    }
 
     bool FullscreenOnMyScreen()
     {
@@ -977,7 +1079,8 @@ class NotchWindow : Window
         bool loading = Loading && mgrError == null, has = session != null;
         string t = has || loading ? titleText.Text : Resumable ? settings.LastTitle : "SideNotch";
         string sub;
-        if (loading) sub = loadingText;
+        if (notice != null) sub = notice;
+        else if (loading) sub = loadingText;
         else if (has)
         {
             string time = Fmt(CurrentPos()) + (HasDuration ? " / " + Fmt(end - start) : "");

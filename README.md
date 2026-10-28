@@ -12,6 +12,7 @@ Double-click `SideNotch.exe` (or `dist\SideNotch.exe` after building). There's n
 
 - **Open:** click the slim tab on the screen edge, or left-click the tray icon.
 - **Hotkey:** Ctrl+Alt+N opens or closes the player from anywhere. If another app already uses that combination, the shortcut is skipped and a note goes in the log.
+- **Scroll on SideNotch** (the tab or the open player): scroll down for the next track, up for the previous one. Hold Ctrl while scrolling to change the playing app's volume in the Windows mixer, 5% per notch. This only works while the cursor is over SideNotch.
 - **Peek:** hover over the tab to see the title, play state and time without opening the player.
 - **Full screen:** the tab hides while a full-screen window (video, game, slideshow) covers its monitor, and returns afterwards.
 - **Close the panel:** click outside it or press Esc.
