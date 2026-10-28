@@ -14,6 +14,7 @@ Double-click `SideNotch.exe` (or `dist\SideNotch.exe` after building). There's n
 - **Close the panel:** click outside it or press Esc.
 - **Move:** drag the tab anywhere. It snaps to the nearer left/right edge of that monitor.
 - **Previous / Next:** the buttons either side of play/pause. They're greyed out when the source doesn't offer them. While the next video loads, the panel keeps the last title dimmed and shows a moving loading bar instead of "Nothing playing". If no track arrives within about 6–8 s, it shows what's actually true.
+- **Resume:** SideNotch remembers the last track, even across restarts. If Chrome or the tab is closed, the panel shows it as *Last played* with its saved position, and Play reopens it in Chrome at that point (it starts over if the song had finished). The link is read from Chrome's address bar while that video's tab is active (nothing is clicked). If the link wasn't caught, Play opens a YouTube search for the title. Other apps are relaunched through their app ID.
 - **Keyboard (panel open):** Space plays/pauses. Tab moves through Previous, Play/Pause, Next and the seek bar. On the seek bar, ←/→ skip 5 s and PgUp/PgDn skip 15 s.
 - **Quit:** tray icon (it may be under the ^ overflow) → *Quit SideNotch*.
 

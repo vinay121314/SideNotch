@@ -49,6 +49,9 @@ class Settings
     public double YFrac = 0.4;   // vertical centre of the notch as a fraction of the work area
     public string Monitor = "";  // Screen.DeviceName; falls back to primary
     public string Source = "";   // preferred session AUMID; "" = automatic (prefer Chrome)
+    // Last track, so the player can offer to resume when the source app is closed.
+    public string LastTitle = "", LastSource = "", LastUrl = "";
+    public double LastPos, LastDur;
 
     public static readonly string Dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SideNotch");
     static readonly string FilePath = System.IO.Path.Combine(Dir, "settings.ini");
@@ -69,6 +72,11 @@ class Settings
                 else if (k == "Y" && double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d >= 0 && d <= 1) s.YFrac = d;
                 else if (k == "Monitor") s.Monitor = v;
                 else if (k == "Source") s.Source = v;
+                else if (k == "LastTitle") s.LastTitle = v;
+                else if (k == "LastSource") s.LastSource = v;
+                else if (k == "LastUrl") s.LastUrl = v;
+                else if (k == "LastPos" && double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d >= 0) s.LastPos = d;
+                else if (k == "LastDur" && double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d >= 0) s.LastDur = d;
             }
         }
         catch (Exception ex) { Program.Log("Settings load: " + ex.Message); }
@@ -84,7 +92,12 @@ class Settings
                 "Side=" + (Right ? "Right" : "Left"),
                 "Y=" + YFrac.ToString("0.####", CultureInfo.InvariantCulture),
                 "Monitor=" + Monitor,
-                "Source=" + Source });
+                "Source=" + Source,
+                "LastTitle=" + LastTitle.Replace('\r', ' ').Replace('\n', ' '),
+                "LastSource=" + LastSource,
+                "LastUrl=" + LastUrl,
+                "LastPos=" + LastPos.ToString("0", CultureInfo.InvariantCulture),
+                "LastDur=" + LastDur.ToString("0", CultureInfo.InvariantCulture) });
         }
         catch (Exception ex) { Program.Log("Settings save: " + ex.Message); }
     }
@@ -390,7 +403,7 @@ class NotchWindow : Window
         Place();
 
         onProps = (s, e) => Ui(RefreshProps);
-        onPlayback = (s, e) => Ui(() => { RefreshPlayback(); Render(); });
+        onPlayback = (s, e) => Ui(() => { RefreshPlayback(); Remember(); Render(); });
         onTimeline = (s, e) => Ui(() => { RefreshTimeline(); Render(); });
 
         tray = new WF.NotifyIcon { Icon = MakeIcon(), Text = "SideNotch", Visible = true, ContextMenuStrip = new WF.ContextMenuStrip() };
@@ -466,6 +479,7 @@ class NotchWindow : Window
         Place();
         Activate();
         outsideWatch.Start();
+        CaptureUrl();
         // Enter decelerates; Windows' "animation effects" setting turns motion off.
         var dur = new Duration(TimeSpan.FromMilliseconds(Motion ? 150 : 0));
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
@@ -544,6 +558,7 @@ class NotchWindow : Window
     {
         if (session != null)
         {
+            Remember(); // e.g. Chrome closed: keep where the track got to
             try
             {
                 session.MediaPropertiesChanged -= onProps;
@@ -590,6 +605,15 @@ class NotchWindow : Window
             {
                 if (Loading && title != loadingFrom) loadingUntil = DateTime.MinValue;
                 lastTitle = title;
+                if (title != settings.LastTitle || sessionId != settings.LastSource)
+                {
+                    settings.LastTitle = title;
+                    settings.LastSource = sessionId;
+                    settings.LastUrl = "";
+                    settings.LastPos = settings.LastDur = 0;
+                    settings.Save();
+                }
+                CaptureUrl();
             }
         }
         catch (Exception ex) { Program.Log("Props: " + ex.Message); }
@@ -651,10 +675,84 @@ class NotchWindow : Window
         return p < TimeSpan.Zero ? TimeSpan.Zero : p;
     }
 
+    // ---------- resume after the source closed ----------
+
+    bool capturing;
+
+    void Remember()
+    {
+        if (session == null || title == "" || title != settings.LastTitle) return;
+        settings.LastPos = Math.Floor(CurrentPos().TotalSeconds);
+        settings.LastDur = HasDuration ? Math.Floor((end - start).TotalSeconds) : 0;
+        settings.Save();
+        CaptureUrl();
+    }
+
+    async void CaptureUrl()
+    {
+        string t = settings.LastTitle;
+        if (capturing || t == "" || settings.LastUrl != "" || !IsChrome(settings.LastSource)) return;
+        capturing = true;
+        string url = await Task.Run(() => FindChromeUrl(t));
+        capturing = false;
+        if (url != null && settings.LastTitle == t) { settings.LastUrl = url; settings.Save(); }
+    }
+
+    // Reads (never clicks) the address bar of the Chrome window whose active tab shows this title.
+    // ponytail: only finds the URL while the video's tab is the active one in its window; on miss, resume falls back to a YouTube search.
+    static string FindChromeUrl(string title)
+    {
+        try
+        {
+            var wins = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ClassNameProperty, "Chrome_WidgetWin_1"));
+            foreach (AutomationElement w in wins)
+            {
+                if (w.Current.Name.IndexOf(title, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var edit = w.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+                object vp;
+                if (edit == null || !edit.TryGetCurrentPattern(ValuePattern.Pattern, out vp)) continue;
+                var url = ((ValuePattern)vp).Current.Value ?? "";
+                if (url.IndexOf("youtu", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                return url.Contains("://") ? url : "https://" + url;
+            }
+        }
+        catch (Exception ex) { Program.Log("Url: " + ex.Message); }
+        return null;
+    }
+
+    bool Resumable { get { return session == null && mgrError == null && settings.LastTitle != ""; } }
+
+    void Resume()
+    {
+        var st = settings;
+        string app = AppName(st.LastSource);
+        try
+        {
+            if (st.LastSource == "" || IsChrome(st.LastSource))
+            {
+                string url;
+                if (st.LastUrl == "") url = "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(st.LastTitle);
+                else
+                {
+                    url = System.Text.RegularExpressions.Regex.Replace(st.LastUrl, @"&t=\d+s?", "");
+                    // Pick up where it stopped, unless it had (nearly) finished.
+                    if (st.LastPos >= 5 && (st.LastDur == 0 || st.LastPos < st.LastDur - 5))
+                        url += (url.Contains("?") ? "&" : "?") + "t=" + st.LastPos.ToString("0", CultureInfo.InvariantCulture) + "s";
+                }
+                try { System.Diagnostics.Process.Start("chrome.exe", "\"" + url + "\""); }
+                catch { System.Diagnostics.Process.Start(url); } // no Chrome: default browser
+            }
+            else System.Diagnostics.Process.Start("explorer.exe", "shell:AppsFolder\\" + st.LastSource);
+        }
+        catch (Exception ex) { Program.Log("Resume: " + ex.Message); Flash("Couldn't open " + app); return; }
+        lastTitle = st.LastTitle;
+        BeginLoading("Opening in " + (app == "" ? "Chrome" : app) + "…", 15, "");
+    }
+
     async void TogglePlay()
     {
         var s = session;
-        if (s == null) return;
+        if (s == null) { if (Resumable && !Loading) Resume(); return; }
         bool ok = false;
         try
         {
@@ -754,24 +852,29 @@ class NotchWindow : Window
         bool loading = Loading && mgrError == null;
         bool has = session != null;
         bool playing = has && !loading && status == Status.Playing;
+        bool resume = !loading && Resumable;
+        string resumeIn = settings.LastSource == "" || IsChrome(settings.LastSource) ? "Chrome" : AppName(settings.LastSource);
 
         if (loading) titleText.Text = lastTitle != "" ? lastTitle : "Loading…";
+        else if (resume) titleText.Text = settings.LastTitle;
         else titleText.Text = !has ? "Nothing playing" : (title == "" ? "Untitled" : title);
-        titleText.Opacity = loading ? 0.45 : 1;
+        titleText.Opacity = loading ? 0.45 : resume ? 0.7 : 1;
         titleText.ToolTip = titleText.Text;
         if (notice != null) sourceText.Text = notice;
         else if (mgrError != null) sourceText.Text = mgrError;
         else if (loading) sourceText.Text = loadingText;
+        else if (resume) sourceText.Text = "Last played · Play resumes in " + resumeIn;
         else if (!has) sourceText.Text = "Start a video in Chrome";
         else sourceText.Text = AppName(sessionId) + (status == Status.Paused ? " · Paused" : "") + (artist != "" ? " · " + artist : "");
         statusDot.Fill = playing ? Accent : Muted;
 
         playIcon.Data = playing ? PauseIcon : PlayIcon;
         playIcon.Margin = new Thickness(playing ? 0 : 3, 0, 0, 0); // optical centring of the triangle
-        AutomationProperties.SetName(playPause, playing ? "Pause" : "Play");
-        playPause.ToolTip = playing ? "Pause" : "Play";
+        string playName = playing ? "Pause" : resume ? "Resume in " + resumeIn : "Play";
+        AutomationProperties.SetName(playPause, playName);
+        playPause.ToolTip = playName;
         // Controls are disabled while a skip is in flight so a second press can't stack up.
-        playPause.IsEnabled = has && !loading && (playing ? canPause || canToggle : canPlay || canToggle);
+        playPause.IsEnabled = resume || has && !loading && (playing ? canPause || canToggle : canPlay || canToggle);
         prevButton.IsEnabled = has && !loading && canPrev;
         nextButton.IsEnabled = has && !loading && canNext;
         prevButton.ToolTip = prevButton.IsEnabled || loading ? "Previous" : "No previous track in this source";
@@ -785,7 +888,7 @@ class NotchWindow : Window
 
         tabMark.Fill = playing || loading ? Accent : Muted;
         tabMark.Opacity = loading ? 0.5 : 1;
-        tab.ToolTip = has || loading ? titleText.Text : "SideNotch";
+        tab.ToolTip = has || loading || resume ? titleText.Text : "SideNotch";
         UpdateTimes();
         UpdateTicker();
     }
@@ -793,6 +896,14 @@ class NotchWindow : Window
     void UpdateTimes()
     {
         if (Loading) { elapsedText.Text = durationText.Text = ""; return; }
+        if (session == null && Resumable)
+        {
+            // Saved position from last time; shown, not seekable (seek.IsEnabled is false without a session).
+            elapsedText.Text = Fmt(TimeSpan.FromSeconds(settings.LastPos));
+            durationText.Text = settings.LastDur > 0 ? Fmt(TimeSpan.FromSeconds(settings.LastDur)) : "--:--";
+            if (settings.LastDur > 0) SetSeek(Math.Min(settings.LastPos, settings.LastDur), settings.LastDur); else SetSeek(0, 1);
+            return;
+        }
         if (session == null) { elapsedText.Text = durationText.Text = "--:--"; SetSeek(0, 1); return; }
         var pos = CurrentPos();
         durationText.Text = HasDuration ? Fmt(end - start) : "--:--"; // never invent a duration
@@ -874,6 +985,7 @@ class NotchWindow : Window
 
     void Quit()
     {
+        Remember();
         tray.Visible = false;
         tray.Dispose();
         Application.Current.Shutdown();
